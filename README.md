@@ -1,5 +1,7 @@
 # AEGIS // ORBITAL — 3D 全球实时情报与态势指挥大屏
 
+🌐 **在线实时体验（Live Demo）**：[https://aegis-orbital-drab.vercel.app](https://aegis-orbital-drab.vercel.app/)
+
 一套面向大屏/副屏与日常桌搭的**科幻战情室 3D 实时地球指挥台**，基于 **Next.js (App Router) + Three.js 自定义 GLSL 着色器 + SGP4 卫星轨道推演 + 多源全球公开遥测 API** 打造，**零 API Key 即可开箱即用、直接部署至 Vercel**。
 
 ## 核心亮点
