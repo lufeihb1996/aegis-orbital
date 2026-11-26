@@ -5,6 +5,9 @@ export type LayerKey =
   | "quakes"
   | "satellites"
   | "events"
+  | "flights"
+  | "aurora"
+  | "wind"
   | "cables"
   | "hubs"
   | "terminator"
@@ -46,6 +49,28 @@ export interface SatelliteLiveState extends SatelliteTLE {
   velocityKmS: number;
   footprintKm: number;
   orbitPath: Array<{ lat: number; lon: number; altitudeKm: number }>;
+}
+
+export interface SatellitePassPrediction {
+  satId: string;
+  satName: string;
+  satNameZh: string;
+  riseTimeMs: number;
+  peakTimeMs: number;
+  durationSec: number;
+  maxElevationDeg: number;
+}
+
+export interface FlightTrack {
+  id: string;
+  callsign: string;
+  originCountry: string;
+  lat: number;
+  lon: number;
+  altitudeM: number;
+  velocityMs: number;
+  headingDeg: number;
+  verticalRateMs: number;
 }
 
 export interface NaturalEvent {
@@ -144,9 +169,16 @@ export interface SubmarineCable {
   lengthKm: number;
 }
 
+export interface MeasurePoint {
+  lat: number;
+  lon: number;
+  label?: string;
+}
+
 export type SelectedTarget =
   | { kind: "quake"; data: QuakeEvent }
   | { kind: "satellite"; id: string }
+  | { kind: "flight"; data: FlightTrack }
   | { kind: "event"; data: NaturalEvent }
   | { kind: "hub"; data: WorldHub }
   | { kind: "probe"; lat: number; lon: number; label?: string };

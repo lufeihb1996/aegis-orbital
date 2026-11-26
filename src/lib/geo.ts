@@ -89,6 +89,70 @@ export function haversineDistanceKm(
   return EARTH_RADIUS_KM * c;
 }
 
+export function initialBearingDeg(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const p1 = lat1 * DEG2RAD;
+  const p2 = lat2 * DEG2RAD;
+  const dl = (lon2 - lon1) * DEG2RAD;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x =
+    Math.cos(p1) * Math.sin(p2) -
+    Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return ((Math.atan2(y, x) * RAD2DEG) + 360) % 360;
+}
+
+/**
+ * Computes approximate astronomical sublunar point (lat/lon) for real-time 3D Moon placement & lunar phase.
+ */
+export function getSublunarPoint(date: Date = new Date()): {
+  lat: number;
+  lon: number;
+  phaseFraction: number;
+} {
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const d = jd - 2451545.0;
+
+  // Mean lunar ecliptic longitude & anomaly
+  const L = (218.316 + 13.176396 * d) % 360;
+  const M = ((134.963 + 13.064993 * d) % 360) * DEG2RAD;
+  const F = ((93.272 + 13.22935 * d) % 360) * DEG2RAD;
+
+  const eclLon = (L + 6.289 * Math.sin(M)) * DEG2RAD;
+  const eclLat = 5.128 * Math.sin(F) * DEG2RAD;
+  const eps = 23.439 * DEG2RAD;
+
+  // Convert ecliptic -> equatorial RA / Dec
+  const sinDec =
+    Math.sin(eclLat) * Math.cos(eps) +
+    Math.cos(eclLat) * Math.sin(eps) * Math.sin(eclLon);
+  const dec = Math.asin(Math.max(-1, Math.min(1, sinDec))) * RAD2DEG;
+
+  const ra =
+    Math.atan2(
+      Math.sin(eclLon) * Math.cos(eps) - Math.tan(eclLat) * Math.sin(eps),
+      Math.cos(eclLon)
+    ) * RAD2DEG;
+
+  // Greenwich Mean Sidereal Time (deg)
+  const gmst = (280.46061837 + 360.98564736629 * d) % 360;
+  let sublunarLon = (ra - gmst) % 360;
+  if (sublunarLon > 180) sublunarLon -= 360;
+  if (sublunarLon < -180) sublunarLon += 360;
+
+  // Synodic lunar phase (0 = New, 0.5 = Full)
+  const synodicPeriod = 29.53058867;
+  const knownNewMoonJd = 2451550.1;
+  const phaseFraction =
+    (((jd - knownNewMoonJd) % synodicPeriod) + synodicPeriod) % synodicPeriod /
+    synodicPeriod;
+
+  return { lat: dec, lon: sublunarLon, phaseFraction };
+}
+
 export function formatCoord(lat: number, lon: number): string {
   const latStr = `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? "N" : "S"}`;
   const lonStr = `${Math.abs(lon).toFixed(2)}°${lon >= 0 ? "E" : "W"}`;

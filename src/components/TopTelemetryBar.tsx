@@ -29,6 +29,7 @@ interface TopTelemetryBarProps {
   spaceWeather: SpaceWeatherData;
   quakeCount: number;
   satCount: number;
+  flightCount: number;
   eventCount: number;
   onCycleTheme: () => void;
   onToggleLocale: () => void;
@@ -72,6 +73,7 @@ export function TopTelemetryBar({
   spaceWeather,
   quakeCount,
   satCount,
+  flightCount,
   eventCount,
   onCycleTheme,
   onToggleLocale,
@@ -144,6 +146,11 @@ export function TopTelemetryBar({
             <Radio className="h-3.5 w-3.5 text-[var(--accent)]" />
             <span>{satCount}</span>
             <span className="text-[var(--text-muted)]">SAT</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+            <span className="h-1.5 w-1.5 rounded-full bg-[#ffe066]" />
+            <span>{flightCount}</span>
+            <span className="text-[var(--text-muted)]">FLT</span>
           </div>
           <div className="flex items-center gap-1.5 text-[var(--text-secondary)]">
             <span className="h-1.5 w-1.5 rounded-full bg-[var(--status-alert)]" />

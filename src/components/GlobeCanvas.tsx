@@ -5,10 +5,13 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   buildCoastlineSegments,
+  createMoonTexture,
   createProceduralEarthTextures,
+  createSunCoronaTexture,
 } from "@/lib/earth-textures";
 import {
   EARTH_RADIUS_KM,
+  getSublunarPoint,
   getSubsolarPoint,
   latLonToVector3Tuple,
   vector3ToLatLon,
@@ -16,8 +19,10 @@ import {
 import { SUBMARINE_CABLES, WORLD_HUBS } from "@/lib/world-data";
 import type {
   CameraTarget,
+  FlightTrack,
   LayerVisibility,
   Locale,
+  MeasurePoint,
   NaturalEvent,
   QuakeEvent,
   SatelliteLiveState,
@@ -31,17 +36,24 @@ interface GlobeCanvasProps {
   layers: LayerVisibility;
   quakes: QuakeEvent[];
   satellites: SatelliteLiveState[];
+  flights: FlightTrack[];
   events: NaturalEvent[];
+  kpIndex: number;
+  timeOffsetMs: number;
+  measureMode: boolean;
+  measurePoints: MeasurePoint[];
   selectedTarget: SelectedTarget | null;
   lockedSatId: string | null;
   autoRotate: boolean;
   cameraTarget: CameraTarget | null;
   onSelectTarget: (target: SelectedTarget) => void;
+  onAddMeasurePoint: (pt: MeasurePoint) => void;
   onUserInteract?: () => void;
 }
 
 const EARTH_R = 1.0;
 const UP_VEC = new THREE.Vector3(0, 0, 1);
+const DEG2RAD = Math.PI / 180;
 
 const THEME_PALETTE: Record<
   ThemeId,
@@ -53,6 +65,8 @@ const THEME_PALETTE: Record<
     packet: number;
     hub: number;
     ring: number;
+    flight: number;
+    wind: number;
   }
 > = {
   cyan: {
@@ -63,6 +77,8 @@ const THEME_PALETTE: Record<
     packet: 0xc2f8ff,
     hub: 0x5ce8ff,
     ring: 0x38e8ff,
+    flight: 0xffe066,
+    wind: 0x7ae8ff,
   },
   phosphor: {
     accent: 0x34f599,
@@ -72,6 +88,8 @@ const THEME_PALETTE: Record<
     packet: 0xb8ffdd,
     hub: 0x4ef7a4,
     ring: 0x34f599,
+    flight: 0xc5ff66,
+    wind: 0x6dffbe,
   },
   amber: {
     accent: 0xffb443,
@@ -81,6 +99,8 @@ const THEME_PALETTE: Record<
     packet: 0xffe8b8,
     hub: 0xffc66b,
     ring: 0xffb443,
+    flight: 0xfff08a,
+    wind: 0xffd480,
   },
 };
 
@@ -124,6 +144,36 @@ function createTangentQuaternion(pos: THREE.Vector3): THREE.Quaternion {
   return new THREE.Quaternion().setFromUnitVectors(UP_VEC, normal);
 }
 
+function computeAircraftMatrix(
+  lat: number,
+  lon: number,
+  headingDeg: number,
+  radius: number,
+  scale: number,
+  outMatrix: THREE.Matrix4
+) {
+  const pos = latLonToVec3(lat, lon, radius);
+  const up = pos.clone().normalize();
+  const northApprox = new THREE.Vector3(0, 1, 0);
+  const east = new THREE.Vector3().crossVectors(northApprox, up);
+  if (east.lengthSq() < 1e-6) east.set(1, 0, 0);
+  east.normalize();
+  const north = new THREE.Vector3().crossVectors(up, east).normalize();
+
+  const hRad = headingDeg * DEG2RAD;
+  const forward = north
+    .clone()
+    .multiplyScalar(Math.cos(hRad))
+    .add(east.clone().multiplyScalar(Math.sin(hRad)))
+    .normalize();
+  const right = new THREE.Vector3().crossVectors(up, forward).normalize();
+
+  // Cone / chevron geometry points along +Y, lying flat in tangent plane along `forward`
+  const basis = new THREE.Matrix4().makeBasis(right, forward, up);
+  const scaleMat = new THREE.Matrix4().makeScale(scale, scale, scale);
+  outMatrix.identity().makeTranslation(pos.x, pos.y, pos.z).multiply(basis).multiply(scaleMat);
+}
+
 const EARTH_VERTEX_SHADER = /* glsl */ `
   varying vec2 vUv;
   varying vec3 vNormalWorld;
@@ -162,46 +212,36 @@ const EARTH_FRAGMENT_SHADER = /* glsl */ `
     vec3 rawNight = texture2D(uNightTex, vUv).rgb;
     float oceanMask = texture2D(uSpecTex, vUv).r;
 
-    // Subtle topographic mountain relief shading from elevation map
     float hC = texture2D(uBumpTex, vUv).r;
     float hR = texture2D(uBumpTex, vUv + vec2(0.0012, 0.0)).r;
     float hU = texture2D(uBumpTex, vUv + vec2(0.0, 0.0018)).r;
     float relief = ((hC - hR) + (hC - hU)) * (1.0 - oceanMask) * 1.9;
 
     float ndotl = dot(N, L);
-    // Crisp, unmistakable Apple Maps Day / Night split
     float dayMask = uUseTerminator > 0.5 ? smoothstep(-0.075, 0.135, ndotl) : 1.0;
     float nightMask = uUseTerminator > 0.5 ? smoothstep(0.085, -0.115, ndotl) : 0.0;
 
-    // 1. VIVID SUNLIT DAY HEMISPHERE (Apple Maps bright sapphire ocean + lush continents)
     float sunDiffuse = clamp(ndotl + relief * 0.22, 0.0, 1.0);
     float dayLightCurve = 0.58 + 0.72 * pow(sunDiffuse, 0.62);
 
     vec3 daySurface = rawDay;
-    // Lift sunlit deep ocean into crisp Apple Maps daylight azure while preserving shallow reefs
     vec3 azureLift = vec3(0.045, 0.155, 0.31) * oceanMask * (0.45 + 0.55 * sunDiffuse);
     daySurface = daySurface * (1.28 * dayLightCurve) + azureLift;
-    // Gently enrich land saturation on sunlit half
     float luma = dot(daySurface, vec3(0.299, 0.587, 0.114));
     daySurface = mix(vec3(luma), daySurface, 1.14);
 
-    // Sunlit specular ocean glint
     vec3 H = normalize(L + V);
     float specPow = mix(36.0, 56.0, uHasRealTex);
     float oceanSpec = pow(max(dot(N, H), 0.0), specPow) * oceanMask * dayMask * 0.52;
     daySurface += vec3(0.95, 0.98, 1.0) * oceanSpec;
 
-    // 2. DRAMATIC DEEP NIGHT HEMISPHERE + GOLDEN BLACK MARBLE CITY LIGHTS
-    // Deep midnight obsidian ocean & faint slate-blue unlit continents
     vec3 nightBase = mix(
       vec3(0.022, 0.036, 0.068),
       vec3(0.008, 0.016, 0.038),
       oceanMask
     );
-    // Subtle moonlight landmass silhouette hint
     nightBase += rawDay * 0.045 * (1.0 - oceanMask);
 
-    // Isolate crisp golden human city lights from Black Marble texture (strips dark blue desert haze)
     float citySignal = uHasRealTex > 0.5
       ? smoothstep(0.09, 0.34, rawNight.r * 1.25 + rawNight.g * 0.42 - rawNight.b * 0.55)
       : smoothstep(0.18, 0.65, rawNight.r * 0.8 + rawNight.g * 0.6);
@@ -211,17 +251,14 @@ const EARTH_FRAGMENT_SHADER = /* glsl */ `
       vec3(1.0, 0.93, 0.72) * pow(citySignal, 2.4) * 1.45;
     vec3 nightSurface = nightBase + goldenCities * (0.7 + 0.3 * nightMask);
 
-    // Blend vivid Day and dramatic Night sharply across real-time terminator
     vec3 color = mix(nightSurface, daySurface, dayMask);
 
-    // 3. GOLDEN-HOUR TWILIGHT SCATTERING RIGHT ALONG THE TERMINATOR
     if (uUseTerminator > 0.5) {
       float duskBand = exp(-pow((ndotl - 0.015) * 11.5, 2.0));
       vec3 twilightWarm = mix(vec3(1.0, 0.44, 0.14), vec3(0.96, 0.62, 0.32), oceanMask);
       color += twilightWarm * duskBand * 0.32;
     }
 
-    // 4. REALISTIC RAYLEIGH ATMOSPHERE RIM ON PLANET EDGE (bright blue on day limb, faint on night)
     float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.6);
     vec3 dayAtmo = mix(vec3(0.32, 0.68, 1.0), uAccentColor, 0.22);
     vec3 nightAtmo = vec3(0.05, 0.12, 0.28);
@@ -231,7 +268,63 @@ const EARTH_FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
-// Dedicated 3D Floating Cloud Layer Shader (bright sunlit white by day, peach at dusk, transparent at night)
+// Volumetric 3D Polar Aurora Oval Curtain Shader (synced live to NOAA Geomagnetic Kp index!)
+const AURORA_VERTEX_SHADER = /* glsl */ `
+  varying vec3 vNormalWorld;
+  varying vec3 vLocalPos;
+
+  void main() {
+    vLocalPos = normalize(position);
+    vNormalWorld = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const AURORA_FRAGMENT_SHADER = /* glsl */ `
+  uniform float uTime;
+  uniform float uKp;
+  uniform vec3 uSunDir;
+
+  varying vec3 vNormalWorld;
+  varying vec3 vLocalPos;
+
+  void main() {
+    // True geomagnetic pole axis (tilted ~9.5 deg toward northern Canada / Antarctica)
+    vec3 magNorth = normalize(vec3(-0.048, 0.986, 0.155));
+    float magSinLat = abs(dot(vLocalPos, magNorth));
+    float magLatDeg = degrees(asin(clamp(magSinLat, 0.0, 1.0)));
+
+    // Kp expands aurora oval southward dynamically (Kp 2 -> 69 deg, Kp 7 -> 58 deg)
+    float ovalCenter = clamp(72.5 - uKp * 2.05, 55.0, 72.5);
+    float ovalWidth = 4.2 + uKp * 0.55;
+
+    float angle = atan(vLocalPos.z, vLocalPos.x);
+    float waveWarp = sin(angle * 4.0 + uTime * 0.42) * 1.7 + cos(angle * 7.0 - uTime * 0.31) * 0.9;
+    float dist = (magLatDeg + waveWarp) - ovalCenter;
+    float band = exp(-pow(dist / ovalWidth, 2.0));
+
+    if (band < 0.03) discard;
+
+    // Animated shimmering curtain rays
+    float curtain1 = 0.5 + 0.5 * sin(angle * 16.0 + uTime * 1.15 + sin(angle * 5.0 - uTime * 0.55) * 2.2);
+    float curtain2 = 0.5 + 0.5 * sin(angle * 29.0 - uTime * 0.85 + magLatDeg * 0.45);
+    float shimmer = pow(curtain1 * 0.65 + curtain2 * 0.35, 1.65);
+
+    // Brightest on night hemisphere, subtle near twilight
+    float ndotl = dot(normalize(vNormalWorld), normalize(uSunDir));
+    float nightVisibility = mix(0.22, 1.0, smoothstep(0.25, -0.22, ndotl));
+
+    // Emerald green lower/equatorward glow -> ethereal violet-magenta poleward crown
+    float colorMix = smoothstep(-ovalWidth * 0.55, ovalWidth * 0.75, dist);
+    vec3 emerald = vec3(0.12, 1.0, 0.62);
+    vec3 violet = vec3(0.68, 0.28, 1.0);
+    vec3 col = mix(emerald, violet, colorMix);
+
+    float intensity = band * (0.42 + 0.95 * shimmer) * nightVisibility * (0.58 + uKp * 0.08);
+    gl_FragColor = vec4(col * 1.25, clamp(intensity * 0.78, 0.0, 0.85));
+  }
+`;
+
 const CLOUDS_VERTEX_SHADER = /* glsl */ `
   varying vec2 vUv;
   varying vec3 vNormalWorld;
@@ -269,8 +362,7 @@ const CLOUDS_FRAGMENT_SHADER = /* glsl */ `
     vec3 col = mix(nightCloudColor, dayCloudColor, dayLit);
     col = mix(col, duskCloudColor, twilight * 0.55);
 
-    // Keep clouds crisp on sunlit side & ultra-faint on night side so city lights stay razor clear
-    float alpha = cloud * mix(0.06, 0.52, dayLit);
+    float alpha = cloud * mix(0.06, 0.50, dayLit);
     gl_FragColor = vec4(col, alpha);
   }
 `;
@@ -311,6 +403,35 @@ const ATMO_FRAGMENT_SHADER = /* glsl */ `
   }
 `;
 
+// Real-time lunar phase shader lit by exact Sun vector
+const MOON_VERTEX_SHADER = /* glsl */ `
+  varying vec2 vUv;
+  varying vec3 vNormalWorld;
+
+  void main() {
+    vUv = uv;
+    vNormalWorld = normalize(mat3(modelMatrix) * normal);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const MOON_FRAGMENT_SHADER = /* glsl */ `
+  uniform sampler2D uMoonTex;
+  uniform vec3 uSunDir;
+
+  varying vec2 vUv;
+  varying vec3 vNormalWorld;
+
+  void main() {
+    vec3 texCol = texture2D(uMoonTex, vUv).rgb;
+    float ndotl = dot(normalize(vNormalWorld), normalize(uSunDir));
+    // Crisp lunar terminator + very faint Earthshine on dark limb
+    float lit = smoothstep(-0.04, 0.14, ndotl) * max(0.2, ndotl * 1.15);
+    vec3 col = texCol * (0.045 + 1.12 * lit);
+    gl_FragColor = vec4(col, 1.0);
+  }
+`;
+
 interface LabelAnchor {
   id: string;
   label: string;
@@ -334,8 +455,62 @@ interface CablePacketRecord {
   speed: number;
 }
 
+interface WindParticle {
+  lat: number;
+  lon: number;
+  age: number;
+  maxAge: number;
+  trail: Array<[number, number]>;
+}
+
 interface PickablePayload {
   target: SelectedTarget;
+}
+
+const WIND_COUNT = 220;
+const WIND_SEGMENTS = 6;
+
+function computeWindVelocityDegPerSec(
+  lat: number,
+  lon: number,
+  storms: Array<{ lat: number; lon: number }>
+): [number, number] {
+  const absLat = Math.abs(lat);
+  let dLon: number;
+  let dLat: number;
+
+  if (absLat < 26) {
+    // Tropical Easterly Trade Winds
+    dLon = -2.8 - Math.cos(lat * DEG2RAD * 3) * 0.9;
+    dLat = -Math.sign(lat) * 0.55;
+  } else if (absLat < 60) {
+    // Mid-Latitude Westerly Jet Streams with planetary Rossby waves
+    const jetPeak = Math.exp(-Math.pow((absLat - 43) / 13, 2));
+    dLon = 3.2 + jetPeak * 4.4;
+    dLat = Math.sin(lon * DEG2RAD * 3.0 + (lat > 0 ? 0.5 : -0.5)) * 1.5;
+  } else {
+    // Polar Easterlies
+    dLon = -2.2;
+    dLat = Math.sin(lon * DEG2RAD * 2.0) * 0.4;
+  }
+
+  // Add swirling cyclone vortices around active NASA EONET Severe Storms
+  for (const s of storms) {
+    const dy = lat - s.lat;
+    let dx = lon - s.lon;
+    if (dx > 180) dx -= 360;
+    if (dx < -180) dx += 360;
+    const dist2 = dx * dx + dy * dy;
+    if (dist2 < 140 && dist2 > 0.2) {
+      const pull = (1 - dist2 / 140) * 5.2;
+      const spinDir = s.lat >= 0 ? 1 : -1; // CCW Northern, CW Southern
+      const invD = 1 / Math.sqrt(dist2);
+      dLon += (-dy * invD * spinDir - dx * invD * 0.25) * pull;
+      dLat += (dx * invD * spinDir - dy * invD * 0.25) * pull;
+    }
+  }
+
+  return [dLat, dLon];
 }
 
 export function GlobeCanvas({
@@ -344,12 +519,18 @@ export function GlobeCanvas({
   layers,
   quakes,
   satellites,
+  flights,
   events,
+  kpIndex,
+  timeOffsetMs,
+  measureMode,
+  measurePoints,
   selectedTarget,
   lockedSatId,
   autoRotate,
   cameraTarget,
   onSelectTarget,
+  onAddMeasurePoint,
   onUserInteract,
 }: GlobeCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -361,11 +542,17 @@ export function GlobeCanvas({
     layers,
     quakes,
     satellites,
+    flights,
     events,
+    kpIndex,
+    timeOffsetMs,
+    measureMode,
+    measurePoints,
     selectedTarget,
     lockedSatId,
     autoRotate,
     onSelectTarget,
+    onAddMeasurePoint,
     onUserInteract,
   });
   propsRef.current = {
@@ -374,19 +561,33 @@ export function GlobeCanvas({
     layers,
     quakes,
     satellites,
+    flights,
     events,
+    kpIndex,
+    timeOffsetMs,
+    measureMode,
+    measurePoints,
     selectedTarget,
     lockedSatId,
     autoRotate,
     onSelectTarget,
+    onAddMeasurePoint,
     onUserInteract,
   };
 
+  // Live animated flight state for smooth dead-reckoning between API refreshes
+  const liveFlightsRef = useRef<FlightTrack[]>([]);
+
   const sceneRefs = useRef<{
     earthMat?: THREE.ShaderMaterial;
+    auroraMat?: THREE.ShaderMaterial;
+    auroraMesh?: THREE.Mesh;
     cloudsMat?: THREE.ShaderMaterial;
     cloudsMesh?: THREE.Mesh;
     atmoMat?: THREE.ShaderMaterial;
+    moonMesh?: THREE.Mesh;
+    moonMat?: THREE.ShaderMaterial;
+    sunSprite?: THREE.Sprite;
     borderLines?: THREE.LineSegments;
     borderMat?: THREE.LineBasicMaterial;
     orbitalRingsGroup?: THREE.Group;
@@ -395,6 +596,12 @@ export function GlobeCanvas({
     eventsGroup?: THREE.Group;
     cablesGroup?: THREE.Group;
     hubsGroup?: THREE.Group;
+    measureGroup?: THREE.Group;
+    measurePulse?: { mesh: THREE.Mesh; curve: THREE.CatmullRomCurve3 } | null;
+    flightsMesh?: THREE.InstancedMesh;
+    flightsMat?: THREE.MeshBasicMaterial;
+    windLines?: THREE.LineSegments;
+    windMat?: THREE.LineBasicMaterial;
     reticleGroup?: THREE.Group;
     pulseRings: PulseRingRecord[];
     cablePackets: CablePacketRecord[];
@@ -413,6 +620,7 @@ export function GlobeCanvas({
     pulseRings: [],
     cablePackets: [],
     pickables: [],
+    measurePulse: null,
     flyAnim: {
       active: false,
       startPos: new THREE.Vector3(),
@@ -434,8 +642,8 @@ export function GlobeCanvas({
     const scene = new THREE.Scene();
 
     const camera = new THREE.PerspectiveCamera(42, width / height, 0.05, 100);
-    // Start framed dramatically across the LIVE real-time Day/Night Terminator (Apple Maps hero framing)
-    const subsolar = getSubsolarPoint();
+    const initDate = new Date(Date.now() + propsRef.current.timeOffsetMs);
+    const subsolar = getSubsolarPoint(initDate);
     let heroLon = subsolar.lon - 56;
     if (heroLon < -180) heroLon += 360;
     const initPos = latLonToVec3(26, heroLon, 2.95);
@@ -457,7 +665,7 @@ export function GlobeCanvas({
     controls.dampingFactor = 0.065;
     controls.enablePan = false;
     controls.minDistance = 1.38;
-    controls.maxDistance = 5.2;
+    controls.maxDistance = 5.4;
     controls.rotateSpeed = 0.55;
     controls.zoomSpeed = 0.85;
 
@@ -471,7 +679,7 @@ export function GlobeCanvas({
     const starPos = new Float32Array(starCount * 3);
     const starCol = new Float32Array(starCount * 3);
     for (let i = 0; i < starCount; i++) {
-      const r = 14 + Math.random() * 28;
+      const r = 15 + Math.random() * 28;
       const u = Math.random();
       const v = Math.random();
       const theta = 2 * Math.PI * u;
@@ -500,14 +708,15 @@ export function GlobeCanvas({
     const stars = new THREE.Points(starGeo, starMat);
     scene.add(stars);
 
-    // Instant zero-flash procedural fallback textures, seamlessly upgraded by self-hosted NASA Blue/Black Marble maps
+    // Procedural fallback Earth textures + NASA self-hosted 2K upgrades
     const procTextures = createProceduralEarthTextures();
+    const moonTexture = createMoonTexture();
+    const sunCoronaTex = createSunCoronaTexture();
     const loadedTextures: THREE.Texture[] = [];
     const palette = THEME_PALETTE[propsRef.current.theme];
 
     const sunDir = latLonToVec3(subsolar.lat, subsolar.lon, 1).normalize();
 
-    // Neutral flat fallback bump/cloud textures before NASA maps resolve (~20ms)
     const emptyPixel = new Uint8Array([0, 0, 0, 255]);
     const fallbackBump = new THREE.DataTexture(emptyPixel, 1, 1, THREE.RGBAFormat);
     fallbackBump.needsUpdate = true;
@@ -533,7 +742,7 @@ export function GlobeCanvas({
     earthMesh.name = "EARTH_SURFACE";
     scene.add(earthMesh);
 
-    // Dedicated 3D Atmospheric Cloud Layer Sphere
+    // 3D Floating Cloud Layer
     const cloudsGeo = new THREE.SphereGeometry(EARTH_R * 1.0075, 96, 64);
     const cloudsMat = new THREE.ShaderMaterial({
       vertexShader: CLOUDS_VERTEX_SHADER,
@@ -550,7 +759,55 @@ export function GlobeCanvas({
     cloudsMesh.visible = propsRef.current.layers.clouds;
     scene.add(cloudsMesh);
 
-    // Load self-hosted NASA Blue Marble, Black Marble, Water Mask, Topology Bump & Clouds from /textures/
+    // 3D Live Polar Aurora Oval Curtain Shell
+    const auroraGeo = new THREE.SphereGeometry(EARTH_R * 1.022, 96, 64);
+    const auroraMat = new THREE.ShaderMaterial({
+      vertexShader: AURORA_VERTEX_SHADER,
+      fragmentShader: AURORA_FRAGMENT_SHADER,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uTime: { value: 0 },
+        uKp: { value: propsRef.current.kpIndex },
+        uSunDir: { value: sunDir.clone() },
+      },
+    });
+    const auroraMesh = new THREE.Mesh(auroraGeo, auroraMat);
+    auroraMesh.visible = propsRef.current.layers.aurora;
+    scene.add(auroraMesh);
+
+    // 3D Real Astronomical Moon with Live Lunar Phase
+    const moonGeo = new THREE.SphereGeometry(0.19, 48, 32);
+    const moonMat = new THREE.ShaderMaterial({
+      vertexShader: MOON_VERTEX_SHADER,
+      fragmentShader: MOON_FRAGMENT_SHADER,
+      uniforms: {
+        uMoonTex: { value: moonTexture },
+        uSunDir: { value: sunDir.clone() },
+      },
+    });
+    const moonMesh = new THREE.Mesh(moonGeo, moonMat);
+    const sublunarInit = getSublunarPoint(initDate);
+    moonMesh.position.copy(latLonToVec3(sublunarInit.lat, sublunarInit.lon, 4.9));
+    scene.add(moonMesh);
+
+    // Luminous Sun Corona & Subtle Anamorphic Lens Flare
+    const sunSpriteMat = new THREE.SpriteMaterial({
+      map: sunCoronaTex,
+      color: 0xffffff,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      opacity: 0.92,
+    });
+    const sunSprite = new THREE.Sprite(sunSpriteMat);
+    sunSprite.scale.set(5.4, 5.4, 1);
+    sunSprite.position.copy(sunDir.clone().multiplyScalar(17.5));
+    scene.add(sunSprite);
+
+    // Load local 2K NASA textures
     const loader = new THREE.TextureLoader();
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     let disposed = false;
@@ -577,7 +834,6 @@ export function GlobeCanvas({
 
     let dayLoaded = false;
     let nightLoaded = false;
-
     loadTex("/textures/earth-day.jpg", true, (tex) => {
       earthMat.uniforms.uDayTex.value = tex;
       dayLoaded = true;
@@ -598,7 +854,7 @@ export function GlobeCanvas({
       cloudsMat.uniforms.uCloudTex.value = tex;
     });
 
-    // Volumetric Apple-Style Atmospheric Rayleigh Halo
+    // Apple-style Atmospheric Rayleigh Halo
     const atmoGeo = new THREE.SphereGeometry(EARTH_R * 1.105, 64, 48);
     const atmoMat = new THREE.ShaderMaterial({
       vertexShader: ATMO_VERTEX_SHADER,
@@ -616,7 +872,7 @@ export function GlobeCanvas({
     const atmoMesh = new THREE.Mesh(atmoGeo, atmoMat);
     scene.add(atmoMesh);
 
-    // Subtle Crisp 3D Vector Borders & Coastlines (delicate so Blue/Black Marble shines through)
+    // 3D Vector Coastlines
     const coastVerts = buildCoastlineSegments(EARTH_R * 1.0025);
     const coastGeo = new THREE.BufferGeometry();
     coastGeo.setAttribute("position", new THREE.BufferAttribute(coastVerts, 3));
@@ -653,12 +909,60 @@ export function GlobeCanvas({
     orbitalRingsGroup.add(buildHoloRing(1.56, -0.35, 0.18, 0.07));
     scene.add(orbitalRingsGroup);
 
+    // 3D Global Atmospheric Wind Streamlines (Single dynamic GPU LineSegments!)
+    const windParticles: WindParticle[] = [];
+    const spawnWind = (p: WindParticle) => {
+      p.lat = (Math.random() - 0.5) * 144;
+      p.lon = (Math.random() - 0.5) * 360;
+      p.age = 0;
+      p.maxAge = 3.5 + Math.random() * 4.5;
+      p.trail = Array.from({ length: WIND_SEGMENTS + 1 }, () => [p.lat, p.lon]);
+    };
+    for (let i = 0; i < WIND_COUNT; i++) {
+      const p: WindParticle = { lat: 0, lon: 0, age: 0, maxAge: 5, trail: [] };
+      spawnWind(p);
+      p.age = Math.random() * p.maxAge;
+      windParticles.push(p);
+    }
+
+    const totalWindVerts = WIND_COUNT * WIND_SEGMENTS * 2;
+    const windPosArr = new Float32Array(totalWindVerts * 3);
+    const windColArr = new Float32Array(totalWindVerts * 3);
+    const windGeo = new THREE.BufferGeometry();
+    windGeo.setAttribute("position", new THREE.BufferAttribute(windPosArr, 3));
+    windGeo.setAttribute("color", new THREE.BufferAttribute(windColArr, 3));
+    const windMat = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.42,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const windLines = new THREE.LineSegments(windGeo, windMat);
+    windLines.visible = propsRef.current.layers.wind;
+    scene.add(windLines);
+
+    // 3D Instanced Live Aircraft Fleet (Single draw call for 240+ jets!)
+    const MAX_FLIGHTS = 260;
+    const jetGeo = new THREE.ConeGeometry(0.0085, 0.024, 3);
+    const flightsMat = new THREE.MeshBasicMaterial({
+      color: palette.flight,
+      transparent: true,
+      opacity: 0.94,
+    });
+    const flightsMesh = new THREE.InstancedMesh(jetGeo, flightsMat, MAX_FLIGHTS);
+    flightsMesh.count = 0;
+    flightsMesh.visible = propsRef.current.layers.flights;
+    flightsMesh.frustumCulled = false;
+    scene.add(flightsMesh);
+
     // Dynamic Layer Groups
     const quakesGroup = new THREE.Group();
     const satsGroup = new THREE.Group();
     const eventsGroup = new THREE.Group();
     const cablesGroup = new THREE.Group();
     const hubsGroup = new THREE.Group();
+    const measureGroup = new THREE.Group();
     const reticleGroup = new THREE.Group();
     reticleGroup.visible = false;
 
@@ -690,10 +994,11 @@ export function GlobeCanvas({
       quakesGroup,
       eventsGroup,
       satsGroup,
+      measureGroup,
       reticleGroup
     );
 
-    // Submarine Cables & Data Packets
+    // Submarine Cables & Flowing Data Packets
     const cablePackets: CablePacketRecord[] = [];
     const buildCables = () => {
       const cableMat = new THREE.LineBasicMaterial({
@@ -727,9 +1032,7 @@ export function GlobeCanvas({
         }
 
         const curve = new THREE.CatmullRomCurve3(curvePts);
-        const lineGeo = new THREE.BufferGeometry().setFromPoints(
-          curve.getPoints(48)
-        );
+        const lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(48));
         const line = new THREE.Line(lineGeo, cableMat);
         cablesGroup.add(line);
 
@@ -750,9 +1053,14 @@ export function GlobeCanvas({
     sceneRefs.current = {
       ...sceneRefs.current,
       earthMat,
+      auroraMat,
+      auroraMesh,
       cloudsMat,
       cloudsMesh,
       atmoMat,
+      moonMesh,
+      moonMat,
+      sunSprite,
       borderLines,
       borderMat,
       orbitalRingsGroup,
@@ -761,13 +1069,18 @@ export function GlobeCanvas({
       eventsGroup,
       cablesGroup,
       hubsGroup,
+      measureGroup,
+      flightsMesh,
+      flightsMat,
+      windLines,
+      windMat,
       reticleGroup,
       cablePackets,
       camera,
       controls,
     };
 
-    // Raycasting for crisp click-to-inspect & click-anywhere surface probe
+    // Raycasting: supports Shift+Click / Measure Mode, Flights, Satellites, Quakes, Events, Hubs & Surface Probes
     const raycaster = new THREE.Raycaster();
     const pointerNdc = new THREE.Vector2();
     let downX = 0;
@@ -787,6 +1100,21 @@ export function GlobeCanvas({
       pointerNdc.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointerNdc, camera);
 
+      // 0. Measure Mode or Shift+Click drops a great-circle measurement pin directly on Earth
+      if (propsRef.current.measureMode || ev.shiftKey) {
+        const earthHits = raycaster.intersectObject(earthMesh, false);
+        if (earthHits.length > 0) {
+          const pt = earthHits[0].point;
+          const { lat, lon } = vector3ToLatLon(pt.x, pt.y, pt.z);
+          propsRef.current.onAddMeasurePoint({
+            lat: Number(lat.toFixed(3)),
+            lon: Number(lon.toFixed(3)),
+          });
+          return;
+        }
+      }
+
+      // 1. Pickable tactical markers (Satellites, Quakes, Events, Hubs)
       const visiblePickables = sceneRefs.current.pickables.filter((obj) => {
         let cur: THREE.Object3D | null = obj;
         while (cur) {
@@ -804,6 +1132,23 @@ export function GlobeCanvas({
         }
       }
 
+      // 2. Pickable Live Aircraft (InstancedMesh)
+      if (flightsMesh.visible && flightsMesh.count > 0) {
+        const flightHits = raycaster.intersectObject(flightsMesh, false);
+        if (
+          flightHits.length > 0 &&
+          flightHits[0].instanceId !== undefined &&
+          liveFlightsRef.current[flightHits[0].instanceId]
+        ) {
+          propsRef.current.onSelectTarget({
+            kind: "flight",
+            data: liveFlightsRef.current[flightHits[0].instanceId],
+          });
+          return;
+        }
+      }
+
+      // 3. Surface Coordinate Probe
       const earthHits = raycaster.intersectObject(earthMesh, false);
       if (earthHits.length > 0) {
         const pt = earthHits[0].point;
@@ -831,8 +1176,11 @@ export function GlobeCanvas({
 
     const projVec = new THREE.Vector3();
     const camDir = new THREE.Vector3();
+    const tempMat = new THREE.Matrix4();
+    const windColor = new THREE.Color();
     const clock = new THREE.Clock();
-    let sunTimer = 0;
+    let astroTimer = 0;
+    let lastOffsetApplied = propsRef.current.timeOffsetMs;
     let rafId = 0;
 
     const labelPool = new Map<string, HTMLDivElement>();
@@ -844,20 +1192,119 @@ export function GlobeCanvas({
       const refs = sceneRefs.current;
       const curProps = propsRef.current;
 
-      // Refresh exact real-time solar vector every 15 seconds
-      sunTimer += dt;
-      if (sunTimer > 15) {
-        sunTimer = 0;
-        const sp = getSubsolarPoint();
+      // Update Sun, Terminator, Moon & Corona immediately on Time Machine offset change or every 2s
+      astroTimer += dt;
+      if (
+        astroTimer > 2 ||
+        Math.abs(curProps.timeOffsetMs - lastOffsetApplied) > 100
+      ) {
+        astroTimer = 0;
+        lastOffsetApplied = curProps.timeOffsetMs;
+        const simDate = new Date(Date.now() + curProps.timeOffsetMs);
+        const sp = getSubsolarPoint(simDate);
         const sd = latLonToVec3(sp.lat, sp.lon, 1).normalize();
         earthMat.uniforms.uSunDir.value.copy(sd);
         cloudsMat.uniforms.uSunDir.value.copy(sd);
+        auroraMat.uniforms.uSunDir.value.copy(sd);
         atmoMat.uniforms.uSunDir.value.copy(sd);
+        moonMat.uniforms.uSunDir.value.copy(sd);
+        sunSprite.position.copy(sd.clone().multiplyScalar(17.5));
+
+        const sl = getSublunarPoint(simDate);
+        moonMesh.position.copy(latLonToVec3(sl.lat, sl.lon, 4.9));
       }
 
-      // Gentle realistic eastward atmospheric cloud drift
+      // Animate Aurora Curtains & Clouds
+      auroraMat.uniforms.uTime.value = elapsed;
       if (cloudsMesh.visible) {
         cloudsMesh.rotation.y = elapsed * 0.0045;
+      }
+
+      // Smooth Dead-Reckoning of Live Aircraft across globe
+      if (flightsMesh.visible && liveFlightsRef.current.length > 0) {
+        const list = liveFlightsRef.current;
+        const count = Math.min(list.length, MAX_FLIGHTS);
+        // Slightly exaggerated visual flight glide (25x real speed so movement feels visibly alive without teleporting)
+        const speedBoost = 25;
+        for (let i = 0; i < count; i++) {
+          const f = list[i];
+          const kmStep = ((f.velocityMs / 1000) * dt * speedBoost);
+          const degStep = (kmStep / EARTH_RADIUS_KM) * (180 / Math.PI);
+          const hRad = f.headingDeg * DEG2RAD;
+          f.lat = Math.max(-82, Math.min(82, f.lat + Math.cos(hRad) * degStep));
+          const cosLat = Math.max(0.2, Math.cos(f.lat * DEG2RAD));
+          f.lon += (Math.sin(hRad) * degStep) / cosLat;
+          if (f.lon > 180) f.lon -= 360;
+          if (f.lon < -180) f.lon += 360;
+
+          computeAircraftMatrix(f.lat, f.lon, f.headingDeg, EARTH_R * 1.0165, 1.0, tempMat);
+          flightsMesh.setMatrixAt(i, tempMat);
+        }
+        flightsMesh.count = count;
+        flightsMesh.instanceMatrix.needsUpdate = true;
+      }
+
+      // Animate 3D Global Atmospheric Wind Streamlines
+      if (windLines.visible) {
+        const storms = curProps.events
+          .filter((e) => e.category === "severeStorms")
+          .map((e) => ({ lat: e.lat, lon: e.lon }));
+        const pCol = THEME_PALETTE[curProps.theme].wind;
+        windColor.setHex(pCol);
+        const posAttr = windGeo.getAttribute("position") as THREE.BufferAttribute;
+        const colAttr = windGeo.getAttribute("color") as THREE.BufferAttribute;
+        const posBuf = posAttr.array as Float32Array;
+        const colBuf = colAttr.array as Float32Array;
+
+        let ptr = 0;
+        for (let i = 0; i < WIND_COUNT; i++) {
+          const wp = windParticles[i];
+          wp.age += dt;
+          if (wp.age >= wp.maxAge || Math.abs(wp.lat) > 84) {
+            spawnWind(wp);
+          } else {
+            const [dLat, dLon] = computeWindVelocityDegPerSec(wp.lat, wp.lon, storms);
+            wp.lat = Math.max(-84, Math.min(84, wp.lat + dLat * dt));
+            wp.lon += dLon * dt;
+            if (wp.lon > 180) wp.lon -= 360;
+            if (wp.lon < -180) wp.lon += 360;
+
+            for (let t = WIND_SEGMENTS; t > 0; t--) {
+              wp.trail[t][0] = wp.trail[t - 1][0];
+              wp.trail[t][1] = wp.trail[t - 1][1];
+            }
+            wp.trail[0][0] = wp.lat;
+            wp.trail[0][1] = wp.lon;
+          }
+
+          const lifeFade = Math.sin((wp.age / wp.maxAge) * Math.PI);
+          for (let s = 0; s < WIND_SEGMENTS; s++) {
+            const [la1, lo1] = wp.trail[s];
+            const [la2, lo2] = wp.trail[s + 1];
+            const jump = Math.abs(lo1 - lo2) > 90;
+            const v1 = latLonToVector3Tuple(la1, lo1, EARTH_R * 1.013);
+            const v2 = jump ? v1 : latLonToVector3Tuple(la2, lo2, EARTH_R * 1.013);
+
+            posBuf[ptr] = v1[0];
+            posBuf[ptr + 1] = v1[1];
+            posBuf[ptr + 2] = v1[2];
+            posBuf[ptr + 3] = v2[0];
+            posBuf[ptr + 4] = v2[1];
+            posBuf[ptr + 5] = v2[2];
+
+            const headFade = (1 - s / WIND_SEGMENTS) * lifeFade;
+            const tailFade = (1 - (s + 1) / WIND_SEGMENTS) * lifeFade;
+            colBuf[ptr] = windColor.r * headFade;
+            colBuf[ptr + 1] = windColor.g * headFade;
+            colBuf[ptr + 2] = windColor.b * headFade;
+            colBuf[ptr + 3] = windColor.r * tailFade;
+            colBuf[ptr + 4] = windColor.g * tailFade;
+            colBuf[ptr + 5] = windColor.b * tailFade;
+            ptr += 6;
+          }
+        }
+        posAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
       }
 
       // Smooth spherical camera fly-to
@@ -920,6 +1367,13 @@ export function GlobeCanvas({
         }
       }
 
+      // Measure arc animated traveling beacon
+      if (refs.measurePulse) {
+        const u = (elapsed * 0.35) % 1;
+        refs.measurePulse.curve.getPointAt(u, refs.measurePulse.mesh.position);
+      }
+
+      // Active target reticle
       if (curProps.selectedTarget) {
         let rPos: THREE.Vector3 | null = null;
         if (curProps.selectedTarget.kind === "quake") {
@@ -946,6 +1400,12 @@ export function GlobeCanvas({
             curProps.selectedTarget.lon,
             EARTH_R * 1.012
           );
+        } else if (curProps.selectedTarget.kind === "flight") {
+          const liveF = liveFlightsRef.current.find(
+            (f) => f.id === (curProps.selectedTarget as { kind: "flight"; data: FlightTrack }).data.id
+          );
+          const fData = liveF ?? curProps.selectedTarget.data;
+          rPos = latLonToVec3(fData.lat, fData.lon, EARTH_R * 1.018);
         } else if (curProps.selectedTarget.kind === "satellite") {
           const sat = curProps.satellites.find(
             (s) => s.id === (curProps.selectedTarget as { kind: "satellite"; id: string }).id
@@ -971,6 +1431,7 @@ export function GlobeCanvas({
 
       renderer.render(scene, camera);
 
+      // Floating crisp HTML callout tags
       const labelRoot = labelLayerRef.current;
       if (labelRoot) {
         const w = container.clientWidth;
@@ -1029,6 +1490,8 @@ export function GlobeCanvas({
       renderer.domElement.removeEventListener("pointerup", handlePointerUp);
       controls.dispose();
       procTextures.dispose();
+      moonTexture.dispose();
+      sunCoronaTex.dispose();
       loadedTextures.forEach((t) => t.dispose());
       fallbackBump.dispose();
       fallbackCloud.dispose();
@@ -1036,10 +1499,19 @@ export function GlobeCanvas({
       earthMat.dispose();
       cloudsGeo.dispose();
       cloudsMat.dispose();
+      auroraGeo.dispose();
+      auroraMat.dispose();
+      moonGeo.dispose();
+      moonMat.dispose();
+      sunSpriteMat.dispose();
       atmoGeo.dispose();
       atmoMat.dispose();
       coastGeo.dispose();
       borderMat.dispose();
+      windGeo.dispose();
+      windMat.dispose();
+      jetGeo.dispose();
+      flightsMat.dispose();
       starGeo.dispose();
       starMat.dispose();
       renderer.dispose();
@@ -1052,7 +1524,24 @@ export function GlobeCanvas({
     };
   }, []);
 
-  // 2. Sync Theme & Layer visibility smoothly without rebuilding WebGL
+  // 2. Sync flights array into live dead-reckoning buffer
+  useEffect(() => {
+    liveFlightsRef.current = flights.map((f) => ({ ...f }));
+    const mesh = sceneRefs.current.flightsMesh;
+    if (mesh) {
+      const tempMat = new THREE.Matrix4();
+      const count = Math.min(flights.length, 260);
+      for (let i = 0; i < count; i++) {
+        const f = flights[i];
+        computeAircraftMatrix(f.lat, f.lon, f.headingDeg, EARTH_R * 1.0165, 1.0, tempMat);
+        mesh.setMatrixAt(i, tempMat);
+      }
+      mesh.count = count;
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+  }, [flights]);
+
+  // 3. Sync Theme, Kp index & Layer visibility
   useEffect(() => {
     const refs = sceneRefs.current;
     const palette = THEME_PALETTE[theme];
@@ -1062,23 +1551,26 @@ export function GlobeCanvas({
       refs.earthMat.uniforms.uAccentColor.value.setHex(palette.accent);
       refs.earthMat.uniforms.uUseTerminator.value = termVal;
     }
-    if (refs.cloudsMat) {
-      refs.cloudsMat.uniforms.uUseTerminator.value = termVal;
+    if (refs.auroraMat) {
+      refs.auroraMat.uniforms.uKp.value = kpIndex;
     }
+    if (refs.auroraMesh) refs.auroraMesh.visible = layers.aurora;
+    if (refs.cloudsMat) refs.cloudsMat.uniforms.uUseTerminator.value = termVal;
     if (refs.cloudsMesh) refs.cloudsMesh.visible = layers.clouds;
     if (refs.atmoMat) {
       refs.atmoMat.uniforms.uAtmoColor.value.setHex(palette.atmo);
       refs.atmoMat.uniforms.uUseTerminator.value = termVal;
     }
-    if (refs.borderMat) {
-      refs.borderMat.color.setHex(palette.border);
-    }
+    if (refs.borderMat) refs.borderMat.color.setHex(palette.border);
     if (refs.borderLines) refs.borderLines.visible = layers.borders;
     if (refs.quakesGroup) refs.quakesGroup.visible = layers.quakes;
     if (refs.satsGroup) refs.satsGroup.visible = layers.satellites;
     if (refs.eventsGroup) refs.eventsGroup.visible = layers.events;
     if (refs.cablesGroup) refs.cablesGroup.visible = layers.cables;
     if (refs.hubsGroup) refs.hubsGroup.visible = layers.hubs;
+    if (refs.flightsMesh) refs.flightsMesh.visible = layers.flights;
+    if (refs.flightsMat) refs.flightsMat.color.setHex(palette.flight);
+    if (refs.windLines) refs.windLines.visible = layers.wind;
 
     if (refs.orbitalRingsGroup) {
       refs.orbitalRingsGroup.children.forEach((child) => {
@@ -1095,9 +1587,89 @@ export function GlobeCanvas({
         }
       });
     }
-  }, [theme, layers]);
+  }, [theme, layers, kpIndex]);
 
-  // 3. Rebuild Dynamic Markers (Quakes, Satellites, Events, Hubs) cleanly on data update
+  // 4. Render Great-Circle Measurement Arc & Pins
+  useEffect(() => {
+    const refs = sceneRefs.current;
+    const g = refs.measureGroup;
+    if (!g) return;
+
+    while (g.children.length > 0) {
+      const obj = g.children[0];
+      g.remove(obj);
+      if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+        obj.geometry.dispose();
+        if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose());
+        else obj.material.dispose();
+      }
+    }
+    refs.measurePulse = null;
+
+    if (measurePoints.length === 0) return;
+
+    for (const pt of measurePoints) {
+      const pos = latLonToVec3(pt.lat, pt.lon, EARTH_R * 1.015);
+      const pin = new THREE.Mesh(
+        new THREE.SphereGeometry(0.015, 12, 12),
+        new THREE.MeshBasicMaterial({ color: 0x4ef7a4 })
+      );
+      pin.position.copy(pos);
+      g.add(pin);
+
+      const halo = new THREE.Mesh(
+        new THREE.RingGeometry(0.02, 0.027, 24),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          side: THREE.DoubleSide,
+          transparent: true,
+          opacity: 0.9,
+          depthWrite: false,
+        })
+      );
+      halo.position.copy(pos);
+      halo.quaternion.copy(createTangentQuaternion(pos));
+      g.add(halo);
+    }
+
+    if (measurePoints.length === 2) {
+      const v1 = latLonToVec3(measurePoints[0].lat, measurePoints[0].lon, EARTH_R * 1.015);
+      const v2 = latLonToVec3(measurePoints[1].lat, measurePoints[1].lon, EARTH_R * 1.015);
+      const dist = v1.distanceTo(v2);
+      const liftMax = Math.min(0.32, 0.07 + dist * 0.14);
+
+      const pts: THREE.Vector3[] = [];
+      const steps = 64;
+      for (let i = 0; i <= steps; i++) {
+        const u = i / steps;
+        const dir = v1.clone().lerp(v2, u).normalize();
+        const lift = Math.sin(u * Math.PI) * liftMax;
+        pts.push(dir.multiplyScalar(EARTH_R * 1.015 + lift));
+      }
+
+      const curve = new THREE.CatmullRomCurve3(pts);
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(72));
+      const line = new THREE.Line(
+        lineGeo,
+        new THREE.LineBasicMaterial({
+          color: 0x4ef7a4,
+          transparent: true,
+          opacity: 0.95,
+          depthWrite: false,
+        })
+      );
+      g.add(line);
+
+      const pulseMesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.014, 10, 10),
+        new THREE.MeshBasicMaterial({ color: 0xffffff })
+      );
+      g.add(pulseMesh);
+      refs.measurePulse = { mesh: pulseMesh, curve };
+    }
+  }, [measurePoints]);
+
+  // 5. Rebuild Dynamic Markers (Quakes, Satellites, Events, Hubs)
   useEffect(() => {
     const refs = sceneRefs.current;
     const { quakesGroup, satsGroup, eventsGroup, hubsGroup } = refs;
@@ -1201,7 +1773,7 @@ export function GlobeCanvas({
         quakesGroup.add(wave);
         pulseRings.push({
           mesh: wave,
-          phase: ((i * 0.23 + w * 0.5) % 1),
+          phase: (i * 0.23 + w * 0.5) % 1,
           baseScale: 0.9,
           maxScale: 2.0 + magFactor * 3.4,
           speed: 0.42 + magFactor * 0.25,
@@ -1336,6 +1908,18 @@ export function GlobeCanvas({
           ),
           kind: "selected",
         });
+      } else if (selectedTarget.kind === "flight") {
+        labelAnchors.push({
+          id: "sel-target",
+          label: `✈ ${selectedTarget.data.callsign}`,
+          sub: `${Math.round(selectedTarget.data.altitudeM)}m`,
+          position: latLonToVec3(
+            selectedTarget.data.lat,
+            selectedTarget.data.lon,
+            EARTH_R * 1.032
+          ),
+          kind: "selected",
+        });
       } else if (selectedTarget.kind === "event") {
         labelAnchors.push({
           id: "sel-target",
@@ -1367,7 +1951,7 @@ export function GlobeCanvas({
     refs.labelAnchors = labelAnchors;
   }, [quakes, satellites, events, selectedTarget, lockedSatId, theme, locale, layers.hubs, layers.satellites]);
 
-  // 4. Trigger smooth camera SLERP fly-to on cameraTarget change
+  // 6. Trigger smooth camera SLERP fly-to
   useEffect(() => {
     const refs = sceneRefs.current;
     if (!cameraTarget || !refs.camera) return;
@@ -1394,7 +1978,11 @@ export function GlobeCanvas({
     <div className="relative h-full w-full overflow-hidden select-none">
       <div
         ref={containerRef}
-        className="h-full w-full cursor-grab active:cursor-grabbing"
+        className={`h-full w-full ${
+          measureMode
+            ? "cursor-crosshair"
+            : "cursor-grab active:cursor-grabbing"
+        }`}
         aria-label="Interactive 3D Global Telemetry Earth"
       />
       <div

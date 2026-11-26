@@ -12,7 +12,10 @@ import {
   MapPin,
   Network,
   Orbit,
+  Plane,
+  Sparkles,
   SunMedium,
+  Wind,
   Zap,
 } from "lucide-react";
 import { formatRelativeTime } from "@/lib/geo";
@@ -70,6 +73,24 @@ export function LeftIntelPanel({
       label: copy.layerSatellites,
       icon: <Orbit className="h-3.5 w-3.5" />,
       dotColor: "#ffcf4d",
+    },
+    {
+      key: "flights",
+      label: copy.layerFlights,
+      icon: <Plane className="h-3.5 w-3.5" />,
+      dotColor: "#ffe066",
+    },
+    {
+      key: "aurora",
+      label: copy.layerAurora,
+      icon: <Sparkles className="h-3.5 w-3.5" />,
+      dotColor: "#28ff9d",
+    },
+    {
+      key: "wind",
+      label: copy.layerWind,
+      icon: <Wind className="h-3.5 w-3.5" />,
+      dotColor: "#7ae8ff",
     },
     {
       key: "quakes",
@@ -253,7 +274,7 @@ export function LeftIntelPanel({
         </div>
 
         {layersOpen && (
-          <div className="grid grid-cols-1 gap-1">
+          <div className="hud-scroll max-h-[205px] overflow-y-auto grid grid-cols-1 gap-1 pr-0.5">
             {layerItems.map((item) => {
               const on = layers[item.key];
               return (

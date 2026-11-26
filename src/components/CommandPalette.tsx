@@ -1,10 +1,11 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Flame, MapPin, Orbit, Search, X } from "lucide-react";
+import { Activity, Flame, MapPin, Orbit, Plane, Search, X } from "lucide-react";
 import { t } from "@/lib/i18n";
 import { WORLD_HUBS } from "@/lib/world-data";
 import type {
+  FlightTrack,
   Locale,
   NaturalEvent,
   QuakeEvent,
@@ -17,6 +18,7 @@ interface CommandPaletteProps {
   locale: Locale;
   quakes: QuakeEvent[];
   satellites: SatelliteLiveState[];
+  flights: FlightTrack[];
   events: NaturalEvent[];
   onClose: () => void;
   onSelect: (target: SelectedTarget) => void;
@@ -27,6 +29,7 @@ export function CommandPalette({
   locale,
   quakes,
   satellites,
+  flights,
   events,
   onClose,
   onSelect,
@@ -107,8 +110,21 @@ export function CommandPalette({
       }
     }
 
+    for (const fl of flights) {
+      const text = `${fl.callsign} ${fl.originCountry} flight 航班`.toLowerCase();
+      if (q && text.includes(q)) {
+        results.push({
+          id: `f-${fl.id}`,
+          label: `✈ ${fl.callsign} (${fl.originCountry})`,
+          sub: `ALT ${Math.round(fl.altitudeM)}m · ${Math.round(fl.velocityMs * 3.6)} km/h`,
+          icon: <Plane className="h-4 w-4 text-[#ffe066]" />,
+          target: { kind: "flight", data: fl },
+        });
+      }
+    }
+
     return results.slice(0, 18);
-  }, [query, satellites, quakes, events, locale]);
+  }, [query, satellites, flights, quakes, events, locale]);
 
   if (!open) return null;
 

@@ -9,19 +9,22 @@ import {
   FALLBACK_SPACE_WEATHER,
 } from "@/lib/fallback-data";
 import { getSubsolarPoint } from "@/lib/geo";
-import { propagateSatellite } from "@/lib/orbital";
+import { predictNextPasses, propagateSatellite } from "@/lib/orbital";
 import { playRadarPing, playTacticalClick, playTargetLock } from "@/lib/sound";
 import { CAMERA_PRESETS, WORLD_HUBS } from "@/lib/world-data";
 import type {
   CameraTarget,
   CoordinateWeather,
+  FlightTrack,
   IntelFeedData,
   LayerKey,
   LayerVisibility,
   Locale,
+  MeasurePoint,
   NaturalEvent,
   QuakeEvent,
   SatelliteLiveState,
+  SatellitePassPrediction,
   SatelliteTLE,
   SelectedTarget,
   SpaceWeatherData,
@@ -35,6 +38,7 @@ import { RightOpsPanel } from "./RightOpsPanel";
 import { TopTelemetryBar } from "./TopTelemetryBar";
 
 const THEME_ORDER: ThemeId[] = ["cyan", "phosphor", "amber"];
+const TWELVE_HOURS_MS = 12 * 3600 * 1000;
 
 export function CommandCenter() {
   const [theme, setTheme] = useState<ThemeId>("cyan");
@@ -51,10 +55,19 @@ export function CommandCenter() {
   const [lockedSatId, setLockedSatId] = useState<string | null>(null);
   const [homeBaseId, setHomeBaseId] = useState("beijing");
 
+  // Time Machine & Tactical Measure State
+  const [timeOffsetMs, setTimeOffsetMs] = useState(0);
+  const [timeLapsePlaying, setTimeLapsePlaying] = useState(false);
+  const [measureMode, setMeasureMode] = useState(false);
+  const [measurePoints, setMeasurePoints] = useState<MeasurePoint[]>([]);
+
   const [layers, setLayers] = useState<LayerVisibility>({
     quakes: true,
     satellites: true,
     events: true,
+    flights: true,
+    aurora: true,
+    wind: true,
     cables: true,
     hubs: true,
     terminator: true,
@@ -62,10 +75,11 @@ export function CommandCenter() {
     borders: true,
   });
 
-  // Live Telemetry Feeds (seeded with curated fallback for instant 0ms render)
+  // Live Telemetry Feeds
   const [quakes, setQuakes] = useState<QuakeEvent[]>(FALLBACK_QUAKES);
   const [satTles, setSatTles] = useState<SatelliteTLE[]>(FALLBACK_SATELLITES);
   const [satellites, setSatellites] = useState<SatelliteLiveState[]>([]);
+  const [flights, setFlights] = useState<FlightTrack[]>([]);
   const [events, setEvents] = useState<NaturalEvent[]>(FALLBACK_EVENTS);
   const [spaceWeather, setSpaceWeather] = useState<SpaceWeatherData>(
     FALLBACK_SPACE_WEATHER
@@ -85,6 +99,8 @@ export function CommandCenter() {
   const [weatherLoading, setWeatherLoading] = useState(false);
 
   const flyNonce = useRef(1);
+  const timeOffsetRef = useRef(0);
+  timeOffsetRef.current = timeOffsetMs;
 
   // Instant smear-free tactical theme switcher
   const applyTheme = useCallback((next: ThemeId) => {
@@ -111,9 +127,10 @@ export function CommandCenter() {
   const syncAllTelemetry = useCallback(async () => {
     setIsSyncing(true);
     try {
-      const [qRes, sRes, eRes, swRes, iRes] = await Promise.allSettled([
+      const [qRes, sRes, fRes, eRes, swRes, iRes] = await Promise.allSettled([
         fetch("/api/quakes").then((r) => r.json()),
         fetch("/api/satellites").then((r) => r.json()),
+        fetch("/api/flights").then((r) => r.json()),
         fetch("/api/events").then((r) => r.json()),
         fetch("/api/space-weather").then((r) => r.json()),
         fetch("/api/intel").then((r) => r.json()),
@@ -131,6 +148,10 @@ export function CommandCenter() {
       ) {
         setSatTles(sRes.value.satellites);
         if (sRes.value.source === "live") anyLive = true;
+      }
+      if (fRes.status === "fulfilled" && Array.isArray(fRes.value?.flights)) {
+        setFlights(fRes.value.flights);
+        if (fRes.value.source === "live") anyLive = true;
       }
       if (eRes.status === "fulfilled" && Array.isArray(eRes.value?.events)) {
         setEvents(eRes.value.events);
@@ -159,21 +180,41 @@ export function CommandCenter() {
     return () => clearInterval(interval);
   }, [syncAllTelemetry]);
 
-  // Real-time SGP4 satellite propagation (every 1.5s)
+  // 600x Timelapse Clock Engine (advances 10 simulated minutes every second)
+  useEffect(() => {
+    if (!timeLapsePlaying) return;
+    const stepMs = 150;
+    const simAdvancePerTick = 600 * stepMs; // 600x speed = 90s simulated per 150ms
+    const timer = setInterval(() => {
+      setTimeOffsetMs((prev) => {
+        const next = prev + simAdvancePerTick;
+        return next > TWELVE_HOURS_MS ? -TWELVE_HOURS_MS : next;
+      });
+    }, stepMs);
+    return () => clearInterval(timer);
+  }, [timeLapsePlaying]);
+
+  // Real-time SGP4 satellite propagation (synced to Time Machine offset!)
   useEffect(() => {
     const computePositions = () => {
-      const now = new Date();
+      const simDate = new Date(Date.now() + timeOffsetRef.current);
       const live: SatelliteLiveState[] = [];
       for (const tle of satTles) {
-        const state = propagateSatellite(tle, now, true);
+        const state = propagateSatellite(tle, simDate, true);
         if (state) live.push(state);
       }
       setSatellites(live);
     };
     computePositions();
-    const timer = setInterval(computePositions, 1500);
+    const timer = setInterval(computePositions, timeLapsePlaying ? 260 : 1400);
     return () => clearInterval(timer);
-  }, [satTles]);
+  }, [satTles, timeOffsetMs, timeLapsePlaying]);
+
+  // Predict next 24h overhead passes for CSS & ISS over selected Home Base City
+  const upcomingPasses = useMemo(() => {
+    const base = WORLD_HUBS.find((h) => h.id === homeBaseId) ?? WORLD_HUBS[0];
+    return predictNextPasses(satTles, base.lat, base.lon, new Date());
+  }, [satTles, homeBaseId]);
 
   // Extract coordinates of currently selected target for live Open-Meteo surface weather
   const selectedCoordsKey = useMemo(() => {
@@ -184,6 +225,9 @@ export function CommandCenter() {
     if (selectedTarget.kind === "event") {
       return `${selectedTarget.data.lat.toFixed(2)},${selectedTarget.data.lon.toFixed(2)}`;
     }
+    if (selectedTarget.kind === "flight") {
+      return `${selectedTarget.data.lat.toFixed(1)},${selectedTarget.data.lon.toFixed(1)}`;
+    }
     if (selectedTarget.kind === "hub") {
       return `${selectedTarget.data.lat.toFixed(2)},${selectedTarget.data.lon.toFixed(2)}`;
     }
@@ -193,7 +237,6 @@ export function CommandCenter() {
     if (selectedTarget.kind === "satellite") {
       const sat = satellites.find((s) => s.id === selectedTarget.id);
       if (sat) {
-        // Bucket sub-satellite weather lookup to ~1 deg grid so it doesn't spam Open-Meteo every 1.5s
         return `${Math.round(sat.lat)},${Math.round(sat.lon)}`;
       }
     }
@@ -266,6 +309,10 @@ export function CommandCenter() {
             lat = target.data.lat;
             lon = target.data.lon;
             distance = 1.95;
+          } else if (target.kind === "flight") {
+            lat = target.data.lat;
+            lon = target.data.lon;
+            distance = 1.9;
           } else if (target.kind === "hub") {
             lat = target.data.lat;
             lon = target.data.lon;
@@ -283,6 +330,36 @@ export function CommandCenter() {
     [satellites, soundEnabled]
   );
 
+  // Jump Time Machine directly to an upcoming space station pass over the Home Base City!
+  const handlePreviewPass = useCallback(
+    (pass: SatellitePassPrediction) => {
+      const base = WORLD_HUBS.find((h) => h.id === homeBaseId) ?? WORLD_HUBS[0];
+      setTimeLapsePlaying(false);
+      setAutoPatrol(false);
+      setAutoRotate(false);
+      setTimeOffsetMs(pass.peakTimeMs - Date.now());
+      setSelectedTarget({ kind: "satellite", id: pass.satId });
+      setLockedSatId(null);
+      setCameraTarget({
+        lat: base.lat,
+        lon: base.lon,
+        distance: 1.95,
+        nonce: ++flyNonce.current,
+      });
+      playTargetLock(soundEnabled);
+    },
+    [homeBaseId, soundEnabled]
+  );
+
+  // Add a tactical measurement point (resets to new pair when 2 already pinned)
+  const handleAddMeasurePoint = useCallback(
+    (pt: MeasurePoint) => {
+      setMeasurePoints((prev) => (prev.length >= 2 ? [pt] : [...prev, pt]));
+      playRadarPing(soundEnabled);
+    },
+    [soundEnabled]
+  );
+
   // Camera presets
   const handleJumpPreset = useCallback(
     (presetId: "global" | "terminator" | "apac" | "europe" | "americas") => {
@@ -290,7 +367,7 @@ export function CommandCenter() {
       setAutoPatrol(false);
 
       if (presetId === "terminator") {
-        const sp = getSubsolarPoint();
+        const sp = getSubsolarPoint(new Date(Date.now() + timeOffsetRef.current));
         let lon = sp.lon - 56;
         if (lon < -180) lon += 360;
         setAutoRotate(false);
@@ -347,7 +424,7 @@ export function CommandCenter() {
     [lockedSatId, satellites, soundEnabled]
   );
 
-  // Auto-Patrol Cinematic Tour (cycles major live quakes, ISS, Tiangong, events & hubs every 8s)
+  // Auto-Patrol Cinematic Tour
   useEffect(() => {
     if (!autoPatrol) return;
     let step = 0;
@@ -363,8 +440,8 @@ export function CommandCenter() {
       }
       if (events[0]) stops.push({ kind: "event", data: events[0] });
       if (quakes[1]) stops.push({ kind: "quake", data: quakes[1] });
-      stops.push({ kind: "hub", data: WORLD_HUBS[2] }); // Tokyo
-      stops.push({ kind: "hub", data: WORLD_HUBS[6] }); // London
+      stops.push({ kind: "hub", data: WORLD_HUBS[2] });
+      stops.push({ kind: "hub", data: WORLD_HUBS[6] });
 
       const pick = stops[step % stops.length];
       step += 1;
@@ -376,7 +453,7 @@ export function CommandCenter() {
     return () => clearInterval(timer);
   }, [autoPatrol, quakes, events, satellites, handleSelectTarget]);
 
-  // Global Keyboard Shortcuts (⌘K / Ctrl+K, Space, H, T, L)
+  // Global Keyboard Shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -406,11 +483,14 @@ export function CommandCenter() {
         cycleTheme();
       } else if (e.key.toLowerCase() === "l") {
         setLocale((v) => (v === "zh" ? "en" : "zh"));
+      } else if (e.key === "Escape" && (measureMode || measurePoints.length > 0)) {
+        setMeasureMode(false);
+        setMeasurePoints([]);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cycleTheme]);
+  }, [cycleTheme, measureMode, measurePoints.length]);
 
   const toggleLayer = useCallback(
     (key: LayerKey) => {
@@ -430,12 +510,20 @@ export function CommandCenter() {
           layers={layers}
           quakes={quakes}
           satellites={satellites}
+          flights={flights}
           events={events}
+          kpIndex={spaceWeather.kpIndex}
+          timeOffsetMs={timeOffsetMs}
+          measureMode={measureMode}
+          measurePoints={measurePoints}
           selectedTarget={selectedTarget}
           lockedSatId={lockedSatId}
           autoRotate={autoRotate}
           cameraTarget={cameraTarget}
-          onSelectTarget={(target) => handleSelectTarget(target, target.kind !== "probe")}
+          onSelectTarget={(target) =>
+            handleSelectTarget(target, target.kind !== "probe")
+          }
+          onAddMeasurePoint={handleAddMeasurePoint}
           onUserInteract={() => {
             setAutoPatrol(false);
             setLockedSatId(null);
@@ -473,6 +561,7 @@ export function CommandCenter() {
         spaceWeather={spaceWeather}
         quakeCount={quakes.length}
         satCount={satellites.length}
+        flightCount={flights.length}
         eventCount={events.length}
         onCycleTheme={cycleTheme}
         onToggleLocale={() => {
@@ -495,7 +584,7 @@ export function CommandCenter() {
         }}
       />
 
-      {/* Side Tactical HUD Panels (Hidden cleanly in Zen Desk Mode) */}
+      {/* Side Tactical HUD Panels */}
       <div className="pointer-events-none relative z-20 flex min-h-0 flex-1 items-stretch justify-between gap-3 px-3 pb-2 sm:px-4">
         {!zenMode ? (
           <>
@@ -521,6 +610,7 @@ export function CommandCenter() {
               selectedTarget={selectedTarget}
               lockedSatId={lockedSatId}
               satellites={satellites}
+              upcomingPasses={upcomingPasses}
               quakes={quakes}
               targetWeather={targetWeather}
               weatherLoading={weatherLoading}
@@ -534,6 +624,7 @@ export function CommandCenter() {
                 if (id) setAutoRotate(false);
                 playTargetLock(soundEnabled);
               }}
+              onPreviewPass={handlePreviewPass}
             />
           </>
         ) : (
@@ -541,12 +632,16 @@ export function CommandCenter() {
         )}
       </div>
 
-      {/* Bottom Sector & Patrol Control Dock */}
+      {/* Bottom Time Machine, Measure HUD & Sector Dock */}
       <BottomControlDock
         locale={locale}
         autoRotate={autoRotate}
         autoPatrol={autoPatrol}
         lockedSatId={lockedSatId}
+        timeOffsetMs={timeOffsetMs}
+        timeLapsePlaying={timeLapsePlaying}
+        measureMode={measureMode}
+        measurePoints={measurePoints}
         onJumpPreset={handleJumpPreset}
         onLockStation={handleLockStation}
         onToggleRotate={() => {
@@ -558,6 +653,28 @@ export function CommandCenter() {
           setAutoPatrol((v) => !v);
           playTacticalClick(soundEnabled);
         }}
+        onChangeTimeOffset={(ms) => {
+          setTimeLapsePlaying(false);
+          setTimeOffsetMs(ms);
+        }}
+        onToggleTimeLapse={() => {
+          setTimeLapsePlaying((v) => !v);
+          playTacticalClick(soundEnabled);
+        }}
+        onResetLiveTime={() => {
+          setTimeLapsePlaying(false);
+          setTimeOffsetMs(0);
+          playTacticalClick(soundEnabled);
+        }}
+        onToggleMeasureMode={() => {
+          setMeasureMode((v) => !v);
+          playTacticalClick(soundEnabled);
+        }}
+        onClearMeasure={() => {
+          setMeasurePoints([]);
+          setMeasureMode(false);
+          playTacticalClick(soundEnabled);
+        }}
       />
 
       {/* ⌘K Global Quick-Jump Command Palette */}
@@ -566,6 +683,7 @@ export function CommandCenter() {
         locale={locale}
         quakes={quakes}
         satellites={satellites}
+        flights={flights}
         events={events}
         onClose={() => setSearchOpen(false)}
         onSelect={(target) => {

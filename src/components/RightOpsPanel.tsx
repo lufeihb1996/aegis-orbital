@@ -6,6 +6,7 @@ import {
   ArrowUpRight,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Cloud,
   Compass,
   Crosshair,
@@ -13,6 +14,8 @@ import {
   ExternalLink,
   Gauge,
   Newspaper,
+  Orbit,
+  Plane,
   Radio,
   Sun,
   Thermometer,
@@ -33,6 +36,7 @@ import type {
   Locale,
   QuakeEvent,
   SatelliteLiveState,
+  SatellitePassPrediction,
   SelectedTarget,
   SpaceWeatherData,
 } from "@/types/telemetry";
@@ -44,6 +48,7 @@ interface RightOpsPanelProps {
   selectedTarget: SelectedTarget | null;
   lockedSatId: string | null;
   satellites: SatelliteLiveState[];
+  upcomingPasses: SatellitePassPrediction[];
   quakes: QuakeEvent[];
   targetWeather: CoordinateWeather | null;
   weatherLoading: boolean;
@@ -53,6 +58,7 @@ interface RightOpsPanelProps {
   onChangeHomeBase: (hubId: string) => void;
   onToggleCollapse: () => void;
   onToggleLockSat: (satId: string | null) => void;
+  onPreviewPass: (pass: SatellitePassPrediction) => void;
 }
 
 export function RightOpsPanel({
@@ -61,6 +67,7 @@ export function RightOpsPanel({
   selectedTarget,
   lockedSatId,
   satellites,
+  upcomingPasses,
   quakes,
   targetWeather,
   weatherLoading,
@@ -70,6 +77,7 @@ export function RightOpsPanel({
   onChangeHomeBase,
   onToggleCollapse,
   onToggleLockSat,
+  onPreviewPass,
 }: RightOpsPanelProps) {
   const copy = t(locale);
   const homeHub =
@@ -128,6 +136,13 @@ export function RightOpsPanel({
         : `${selectedTarget.data.name}, ${selectedTarget.data.country}`;
     targetSubtitle =
       locale === "zh" ? selectedTarget.data.roleZh : selectedTarget.data.role;
+    targetCoords = {
+      lat: selectedTarget.data.lat,
+      lon: selectedTarget.data.lon,
+    };
+  } else if (selectedTarget?.kind === "flight") {
+    targetTitle = `✈ ${selectedTarget.data.callsign}`;
+    targetSubtitle = `${selectedTarget.data.originCountry} · ADS-B LIVE`;
     targetCoords = {
       lat: selectedTarget.data.lat,
       lon: selectedTarget.data.lon,
@@ -314,6 +329,43 @@ export function RightOpsPanel({
                 </div>
               )}
 
+              {/* Flight Specialized Telemetry */}
+              {selectedTarget.kind === "flight" && (
+                <div className="grid grid-cols-3 gap-1.5">
+                  <div className="hud-card rounded-[6px] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      {copy.flightAlt}
+                    </div>
+                    <div className="mt-0.5 font-mono text-[13px] font-semibold text-[var(--text-primary)] tabular">
+                      {Math.round(selectedTarget.data.altitudeM).toLocaleString()}{" "}
+                      <span className="text-[9.5px] font-normal text-[var(--text-muted)]">
+                        m
+                      </span>
+                    </div>
+                  </div>
+                  <div className="hud-card rounded-[6px] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      {copy.flightSpeed}
+                    </div>
+                    <div className="mt-0.5 font-mono text-[13px] font-semibold text-[var(--text-primary)] tabular">
+                      {Math.round(selectedTarget.data.velocityMs * 3.6)}{" "}
+                      <span className="text-[9.5px] font-normal text-[var(--text-muted)]">
+                        km/h
+                      </span>
+                    </div>
+                  </div>
+                  <div className="hud-card rounded-[6px] p-2">
+                    <div className="text-[10px] text-[var(--text-muted)]">
+                      {copy.flightHeading}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1 font-mono text-[13px] font-semibold text-[var(--accent)] tabular">
+                      <Plane className="h-3 w-3" />
+                      <span>{selectedTarget.data.headingDeg}°</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Distance from User's Selected Base City */}
               {distKm !== null && (
                 <div className="flex items-center justify-between rounded-[6px] border border-[var(--border-subtle)] bg-[oklch(0_0_0/0.22)] px-2.5 py-1.5 text-[11.5px]">
@@ -411,6 +463,75 @@ export function RightOpsPanel({
                   <ExternalLink className="h-3 w-3" />
                 </a>
               )}
+            </div>
+          )}
+        </section>
+
+        {/* 1.5 Overhead Space Station Pass Predictor (SGP4 24H) */}
+        <section className="hud-panel rounded-[14px] p-3">
+          <div className="flex items-center justify-between pb-2">
+            <div className="flex items-center gap-1.5 text-[11.5px] font-semibold uppercase tracking-[0.08em] text-[var(--text-secondary)]">
+              <Orbit className="h-3.5 w-3.5 text-[#ffcf4d]" />
+              <span>{copy.nextPasses}</span>
+            </div>
+            <span className="font-mono text-[10px] text-[var(--accent)]">
+              {locale === "zh" ? homeHub.nameZh : homeHub.name}
+            </span>
+          </div>
+
+          {upcomingPasses.length === 0 ? (
+            <div className="rounded-[6px] bg-[oklch(0_0_0/0.2)] px-2.5 py-2 text-[11.5px] text-[var(--text-muted)]">
+              {copy.noPassSoon}
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {upcomingPasses.slice(0, 3).map((pass) => {
+                const diffMin = Math.max(
+                  0,
+                  Math.round((pass.riseTimeMs - Date.now()) / 60000)
+                );
+                const hrs = Math.floor(diffMin / 60);
+                const mins = diffMin % 60;
+                const countdown =
+                  hrs > 0
+                    ? `${hrs}h ${mins.toString().padStart(2, "0")}m`
+                    : `${mins}m`;
+                const localTime = new Intl.DateTimeFormat("en-GB", {
+                  timeZone: homeHub.timezone,
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: false,
+                }).format(new Date(pass.riseTimeMs));
+
+                return (
+                  <div
+                    key={`${pass.satId}-${pass.riseTimeMs}`}
+                    className="hud-card flex items-center justify-between gap-2 rounded-[6px] px-2.5 py-1.5"
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-[12px] font-medium text-[var(--text-primary)]">
+                        {locale === "zh" ? pass.satNameZh : pass.satName}
+                      </div>
+                      <div className="mt-0.5 flex items-center gap-2 font-mono text-[10.5px] text-[var(--text-muted)] tabular">
+                        <span className="inline-flex items-center gap-1 text-[var(--accent)]">
+                          <Clock className="h-2.5 w-2.5" />
+                          {localTime} (+{countdown})
+                        </span>
+                        <span>
+                          {copy.nextPassPeak} {pass.maxElevationDeg}°
+                        </span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onPreviewPass(pass)}
+                      className="hud-btn shrink-0 rounded-[5px] border border-[var(--accent-border)] bg-[var(--accent-soft)] px-2 py-1 text-[11px] font-medium text-[var(--accent)] hover:bg-[var(--accent)] hover:text-[var(--accent-fg)]"
+                    >
+                      {copy.jumpToPass}
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>
