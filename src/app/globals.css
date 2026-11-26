@@ -1,0 +1,263 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="cyan"] {
+  --bg-void: oklch(0.115 0.018 248);
+  --bg-panel: oklch(0.145 0.02 248 / 0.78);
+  --bg-panel-solid: oklch(0.15 0.022 248);
+  --bg-card: oklch(0.185 0.022 248 / 0.65);
+  --bg-card-hover: oklch(0.225 0.028 248 / 0.85);
+
+  --border-subtle: oklch(0.75 0.06 218 / 0.14);
+  --border-strong: oklch(0.78 0.11 215 / 0.34);
+
+  --text-primary: oklch(0.95 0.01 230);
+  --text-secondary: oklch(0.78 0.025 228);
+  --text-muted: oklch(0.6 0.025 232);
+
+  --accent: oklch(0.82 0.14 206);
+  --accent-strong: oklch(0.72 0.15 208);
+  --accent-soft: oklch(0.82 0.14 206 / 0.14);
+  --accent-border: oklch(0.82 0.14 206 / 0.42);
+  --accent-fg: oklch(0.12 0.02 230);
+
+  --status-nominal: oklch(0.78 0.16 155);
+  --status-warn: oklch(0.82 0.16 78);
+  --status-alert: oklch(0.72 0.19 42);
+  --status-critical: oklch(0.66 0.22 20);
+}
+
+[data-theme="phosphor"] {
+  --bg-void: oklch(0.11 0.02 162);
+  --bg-panel: oklch(0.14 0.024 162 / 0.8);
+  --bg-panel-solid: oklch(0.145 0.024 162);
+  --bg-card: oklch(0.18 0.028 160 / 0.66);
+  --bg-card-hover: oklch(0.22 0.036 160 / 0.85);
+
+  --border-subtle: oklch(0.78 0.12 158 / 0.15);
+  --border-strong: oklch(0.82 0.15 156 / 0.36);
+
+  --text-primary: oklch(0.95 0.02 156);
+  --text-secondary: oklch(0.78 0.045 156);
+  --text-muted: oklch(0.6 0.04 156);
+
+  --accent: oklch(0.84 0.17 156);
+  --accent-strong: oklch(0.74 0.17 156);
+  --accent-soft: oklch(0.84 0.17 156 / 0.15);
+  --accent-border: oklch(0.84 0.17 156 / 0.45);
+  --accent-fg: oklch(0.12 0.02 156);
+
+  --status-nominal: oklch(0.84 0.17 156);
+  --status-warn: oklch(0.83 0.16 86);
+  --status-alert: oklch(0.74 0.19 44);
+  --status-critical: oklch(0.66 0.22 22);
+}
+
+[data-theme="amber"] {
+  --bg-void: oklch(0.115 0.018 55);
+  --bg-panel: oklch(0.15 0.022 52 / 0.82);
+  --bg-panel-solid: oklch(0.155 0.022 52);
+  --bg-card: oklch(0.19 0.028 52 / 0.68);
+  --bg-card-hover: oklch(0.235 0.035 54 / 0.86);
+
+  --border-subtle: oklch(0.8 0.1 66 / 0.16);
+  --border-strong: oklch(0.82 0.14 68 / 0.38);
+
+  --text-primary: oklch(0.95 0.018 75);
+  --text-secondary: oklch(0.79 0.04 72);
+  --text-muted: oklch(0.61 0.038 66);
+
+  --accent: oklch(0.82 0.15 74);
+  --accent-strong: oklch(0.73 0.15 68);
+  --accent-soft: oklch(0.82 0.15 74 / 0.15);
+  --accent-border: oklch(0.82 0.15 74 / 0.44);
+  --accent-fg: oklch(0.14 0.02 52);
+
+  --status-nominal: oklch(0.78 0.16 150);
+  --status-warn: oklch(0.82 0.15 74);
+  --status-alert: oklch(0.71 0.2 38);
+  --status-critical: oklch(0.64 0.22 20);
+}
+
+@theme inline {
+  --font-sans: "Inter", "SF Pro Display", "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "SF Mono", Consolas,
+    ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Suppress transition smear on instant tactical theme switch */
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition-duration: 0ms !important;
+}
+
+html,
+body {
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  overflow: hidden;
+  height: 100%;
+  width: 100%;
+  color-scheme: dark;
+}
+
+/* Tabular telemetry figures everywhere */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Tactical frosted obsidian glass panel */
+.hud-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 oklch(1 0 0 / 0.06),
+    0 18px 44px -16px oklch(0 0 0 / 0.72);
+}
+
+.hud-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  transition-property: background-color, border-color, color;
+  transition-duration: 140ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+@media (hover: hover) {
+  .hud-card-interactive:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-strong);
+  }
+}
+
+.hud-btn {
+  -webkit-tap-highlight-color: transparent;
+  transition-property: background-color, border-color, color, transform, opacity;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .hud-btn:not(:disabled):active {
+    transform: scale(0.96);
+  }
+}
+
+/* Subtle optional CRT scanline overlay */
+.crt-overlay {
+  background-image: linear-gradient(
+    to bottom,
+    transparent 50%,
+    oklch(0 0 0 / 0.16) 50%
+  );
+  background-size: 100% 3px;
+}
+
+/* Space radial backdrop behind 3D Earth */
+.orbital-backdrop {
+  background:
+    radial-gradient(
+      circle at 50% 48%,
+      color-mix(in oklch, var(--accent) 12%, transparent) 0%,
+      transparent 48%
+    ),
+    radial-gradient(
+      circle at 50% 50%,
+      oklch(0.14 0.02 248) 0%,
+      var(--bg-void) 76%
+    );
+}
+
+/* Crisp screen-projected 3D globe floating callouts */
+.globe-float-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 6px;
+  margin-left: 8px;
+  margin-top: -10px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.2;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  color: var(--text-primary);
+  background: oklch(0.11 0.015 245 / 0.78);
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--accent);
+  backdrop-filter: blur(6px);
+  opacity: 0;
+  transition-property: opacity;
+  transition-duration: 120ms;
+  will-change: transform, opacity;
+}
+
+.globe-float-label[data-kind="sat"] {
+  border-left-color: #ffcf4d;
+  border-color: oklch(0.88 0.14 85 / 0.35);
+  background: oklch(0.12 0.02 245 / 0.86);
+}
+
+.globe-float-label[data-kind="selected"] {
+  border-left-color: #ffffff;
+  border-color: var(--accent-border);
+  background: oklch(0.15 0.025 245 / 0.92);
+}
+
+.globe-label-title {
+  font-weight: 600;
+}
+
+.globe-label-sub {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Sleek thin tactical scrollbars */
+.hud-scroll {
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.hud-scroll::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+.hud-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.hud-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+
+/* Status pulse beacon */
+@keyframes beacon-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.86);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .animate-beacon {
+    animation: beacon-pulse 2s ease-in-out infinite;
+  }
+}
